@@ -244,6 +244,23 @@ async def async_setup_entry(
                 }
                 entities.append(LoxoneMeterSensor(**subsensor))
 
+    # Dave: register humidity sensors for IRoomControllerV2
+    for climate_id in get_all(loxconfig, "IRoomControllerV2"):
+        climate = add_room_and_cat_to_value_values(loxconfig, climate_id)
+        if "humidityActual" in climate["states"]:
+            humidity = {
+                "parent_id": climate["uuidAction"],
+                "uuidAction": climate["states"]["humidityActual"],
+                "type": "analog",
+                "room": climate.get("room", ""),
+                "cat": climate.get("cat", ""),
+                "name": f"{climate['name']} - Humidity",
+                "details": {"format": "%.1f%"},
+                "async_add_devices": async_add_entities,
+                "config_entry": config_entry,
+            }
+            entities.append(LoxoneSensor(**humidity))
+
     @callback
     def async_add_sensors(_):
         async_add_entities(_, True)

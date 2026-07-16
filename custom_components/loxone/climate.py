@@ -13,7 +13,7 @@ from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (ClimateEntityFeature,
                                                     HVACAction, HVACMode)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import PRECISION_TENTHS, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -281,6 +281,12 @@ class LoxoneRoomController(LoxoneEntity, ClimateEntity, ABC):
 
         return UnitOfTemperature.CELSIUS
 
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
+
     @property
     def target_temperature_step(self) -> float | None:
         """Return the supported step of target temperature."""
@@ -336,6 +342,13 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         self.type = "RoomControllerV2"
         self._modeList = kwargs["details"]["timerModes"]
 
+        # Dave: handle hardcoded mode ID in our own system config.
+        if 3 in {mode["id"] for mode in self._modeList}:
+            error_msg = "Mode ID 3 is reserved for 'Fixed Setpoint' and should not be in the API."
+            _LOGGER.critical(error_msg)
+            raise RuntimeError(error_msg)
+        self._modeList.append({"id": 3, "name": "Fixed Setpoint", "description": "Fixed Setpoint Mode"})
+
         self._attr_device_info = get_or_create_device(
             self.unique_id, self.name, self.type, self.room
         )
@@ -344,6 +357,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         for mode in self._modeList:
             if mode["id"] == mode_id:
                 return mode["name"]
+        return None
 
     async def event_handler(self, event):
         # _LOGGER.debug(f"Climate Event data: {event.data}")
@@ -392,6 +406,12 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
     def current_temperature(self):
         """Return the current temperature."""
         return self.get_state_value("tempActual")
+
+    # Dave: return current humidity for IRoomControllerV2
+    @property
+    def current_humidity(self):
+        """Return the current humidity."""
+        return self.get_state_value("humidityActual")
 
     def set_temperature(self, **kwargs):
         """Set new target temperature"""
@@ -450,6 +470,11 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         # format string for the room controller's input temperature sensor.
         # We assume that the format string contains the unit of temperature,
         # and default to Celsius if not.
+
+        # Dave: short circuitting this logic for now. The format string isn't
+        # present in our setup, and our units are set to Fahrenheit.
+        return UnitOfTemperature.FAHRENHEIT
+
         format_str = self.details.get("format")
 
         if format_str is None:
@@ -462,6 +487,12 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
             return UnitOfTemperature.CELSIUS
 
         return UnitOfTemperature.CELSIUS
+
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
 
     @property
     def target_temperature(self) -> float | None:
@@ -665,6 +696,12 @@ class LoxoneAcControl(LoxoneEntity, ClimateEntity, ABC):
                 return UnitOfTemperature.CELSIUS
             return UnitOfTemperature.FAHRENHEIT
         return UnitOfTemperature.CELSIUS
+
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
 
     @property
     def target_temperature(self) -> float | None:
