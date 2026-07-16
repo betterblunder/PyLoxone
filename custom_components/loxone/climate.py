@@ -13,7 +13,7 @@ from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (ClimateEntityFeature,
                                                     HVACAction, HVACMode)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import PRECISION_TENTHS, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -281,6 +281,12 @@ class LoxoneRoomController(LoxoneEntity, ClimateEntity, ABC):
 
         return UnitOfTemperature.CELSIUS
 
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
+
     @property
     def target_temperature_step(self) -> float | None:
         """Return the supported step of target temperature."""
@@ -473,6 +479,12 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
             return UnitOfTemperature.CELSIUS
 
         return UnitOfTemperature.CELSIUS
+
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
 
     @property
     def target_temperature(self) -> float | None:
@@ -676,6 +688,12 @@ class LoxoneAcControl(LoxoneEntity, ClimateEntity, ABC):
                 return UnitOfTemperature.CELSIUS
             return UnitOfTemperature.FAHRENHEIT
         return UnitOfTemperature.CELSIUS
+
+    # Dave: override system precision to report tenths-of-a-degree
+    @property
+    def precision(self) -> float:
+        """Loxone always reports temperatures with tenths-of-a-degree precision."""
+        return PRECISION_TENTHS
 
     @property
     def target_temperature(self) -> float | None:
