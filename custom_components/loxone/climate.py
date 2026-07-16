@@ -450,6 +450,11 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         # format string for the room controller's input temperature sensor.
         # We assume that the format string contains the unit of temperature,
         # and default to Celsius if not.
+
+        # Dave: short circuitting this logic for now. The format string isn't
+        # present in our setup, and our units are set to Fahrenheit.
+        return UnitOfTemperature.FAHRENHEIT
+
         format_str = self.details.get("format")
 
         if format_str is None:
