@@ -342,6 +342,13 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         self.type = "RoomControllerV2"
         self._modeList = kwargs["details"]["timerModes"]
 
+        # Dave: handle hardcoded mode ID in our own system config.
+        if 3 in {mode["id"] for mode in self._modeList}:
+            error_msg = "Mode ID 3 is reserved for 'Fixed Setpoint' and should not be in the API."
+            _LOGGER.critical(error_msg)
+            raise RuntimeError(error_msg)
+        self._modeList.append({"id": 3, "name": "Fixed Setpoint", "description": "Fixed Setpoint Mode"})
+
         self._attr_device_info = get_or_create_device(
             self.unique_id, self.name, self.type, self.room
         )
@@ -350,6 +357,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         for mode in self._modeList:
             if mode["id"] == mode_id:
                 return mode["name"]
+        return None
 
     async def event_handler(self, event):
         # _LOGGER.debug(f"Climate Event data: {event.data}")
