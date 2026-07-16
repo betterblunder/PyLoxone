@@ -393,6 +393,12 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Return the current temperature."""
         return self.get_state_value("tempActual")
 
+    # Dave: return current humidity for IRoomControllerV2
+    @property
+    def current_humidity(self):
+        """Return the current humidity."""
+        return self.get_state_value("humidityActual")
+
     def set_temperature(self, **kwargs):
         """Set new target temperature"""
         if (
