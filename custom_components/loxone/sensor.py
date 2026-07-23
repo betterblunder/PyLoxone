@@ -261,6 +261,31 @@ async def async_setup_entry(
             }
             entities.append(LoxoneSensor(**humidity))
 
+    # Dave: register fan-speed sensors for IRoomControllerV2, as a percentage
+    # of the room's configured speed steps (Loxone only exposes a raw level,
+    # e.g. 1-3 or 1-6 depending on the room's linkedFancoils.fanspeedSteps).
+    for climate_id in get_all(loxconfig, "IRoomControllerV2"):
+        climate = add_room_and_cat_to_value_values(loxconfig, climate_id)
+        linked_fancoils = climate["details"].get("linkedFancoils")
+        if (
+            "fan" in climate["states"]
+            and linked_fancoils
+            and linked_fancoils.get("useFancoil")
+        ):
+            fan_speed = {
+                "parent_id": climate["uuidAction"],
+                "uuidAction": climate["states"]["fan"],
+                "type": "analog",
+                "room": climate.get("room", ""),
+                "cat": climate.get("cat", ""),
+                "name": f"{climate['name']} - Fan Speed",
+                "details": {"format": "%.0f%"},
+                "fanspeed_steps": linked_fancoils["fanspeedSteps"],
+                "async_add_devices": async_add_entities,
+                "config_entry": config_entry,
+            }
+            entities.append(LoxoneFanSpeedSensor(**fan_speed))
+
     @callback
     def async_add_sensors(_):
         async_add_entities(_, True)
@@ -481,6 +506,21 @@ class LoxoneSensor(LoxoneEntity, SensorEntity):
             **self._attr_extra_state_attributes,
             "device_type": self.type + "_sensor",
         }
+
+
+class LoxoneFanSpeedSensor(LoxoneSensor):
+    """Fan speed reported as a percentage of the room's configured speed steps."""
+
+    def __init__(self, **kwargs):
+        self._fanspeed_steps = kwargs.pop("fanspeed_steps")
+        super().__init__(**kwargs)
+
+    async def event_handler(self, e):
+        if self.uuidAction in e.data:
+            self._attr_native_value = round(
+                e.data[self.uuidAction] / self._fanspeed_steps * 100
+            )
+            self.async_schedule_update_ha_state()
 
 
 class LoxoneMeterSensor(LoxoneSensor, SensorEntity):
