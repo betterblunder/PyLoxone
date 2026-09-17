@@ -80,6 +80,23 @@ async def async_setup_entry(
         sensor.update({"type": "smoke"})
         entities.append(LoxoneDigitalSensor(**sensor))
 
+    # Dave: register shading-output binary sensors for IRoomControllerV2.
+    # "On" means the room's HVAC/fan coil is struggling to keep up with cooling
+    # demand and is requesting the shades be lowered to help - not that the
+    # shades are physically down, so no BinarySensorDeviceClass fits cleanly.
+    for climate_id in get_all(loxconfig, "IRoomControllerV2"):
+        climate = add_room_and_cat_to_value_values(loxconfig, climate_id)
+        if "shadingOut" in climate["states"]:
+            shading = {
+                "parent_id": climate["uuidAction"],
+                "uuidAction": climate["states"]["shadingOut"],
+                "type": "shading",
+                "room": climate.get("room", ""),
+                "cat": climate.get("cat", ""),
+                "name": f"{climate['name']} - Shade Assist Requested",
+            }
+            entities.append(LoxoneDigitalSensor(**shading))
+
     @callback
     def async_add_binary_sensors(_):
         async_add_entities(_, True)
@@ -134,16 +151,15 @@ class LoxoneDigitalSensor(LoxoneEntity, BinarySensorEntity):
         else:
             self._attr_device_class = None
 
-        if self._parent_id:
-            self.uuidAction = self._parent_id
+        _uuid = self._parent_id if self._parent_id else self.unique_id
 
         if self._from_loxone_config:
             self._attr_device_info = get_or_create_device(
-                self.unique_id, self.name, self.type, self.room
+                _uuid, self.name, self.type, self.room
             )
         else:
             self._attr_device_info = get_or_create_device(
-                self.unique_id, self.name, self.type, ""
+                _uuid, self.name, self.type, ""
             )
 
         if self._from_loxone_config:
