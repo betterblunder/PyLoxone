@@ -484,6 +484,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Return the current humidity."""
         return self.get_state_value("humidityActual")
 
+    @property
     def active_mode(self) -> ActiveMode:
         return self.active_state.mode
 
@@ -646,6 +647,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
                 return self.get_state_value("heatProtectTemperature")
             elif active == ActiveMode.OFF:
                 return None
+        return None
 
     @property
     def target_temperature_low(self) -> float | None:
@@ -664,6 +666,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
                 return self.get_state_value("frostProtectTemperature")
             elif active == ActiveMode.OFF:
                 return None
+        return None
 
     @property
     def hvac_action(self) -> HVACAction | None:
