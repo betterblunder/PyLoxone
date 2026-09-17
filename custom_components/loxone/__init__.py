@@ -163,6 +163,11 @@ async def async_migrate_entry(hass, config_entry):
         config_entry.options = {**new}
         config_entry.version = 3
         _LOGGER.info("Migration to version %s successful", 3)
+    if config_entry.version == 4:
+        new = {**config_entry.options}
+        config_entry.options = {**new}
+        config_entry.version = 3
+        _LOGGER.info("Migration to version %s successful", 3)
     return True
 
 
