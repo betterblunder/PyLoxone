@@ -35,7 +35,8 @@ from . import LoxoneEntity, MiniServer
 from .const import (CLIMATE_EVENT, CONF_ACTIONID, DOMAIN, EVENT, SENDDOMAIN,
                     THROTTLE_KEEP_ALIVE_TIME)
 from .helpers import (add_room_and_cat_to_value_values, clean_unit, get_all,
-                      get_or_create_device)
+                      get_or_create_device,
+                      get_or_create_room_controller_device)
 from .miniserver import get_miniserver_from_hass
 
 NEW_SENSOR = "sensors"
@@ -222,8 +223,7 @@ async def async_setup_entry(
         entities.append(LoxoneVersionSensor(miniserver.serial, loxconfig["softwareVersion"]))
 
     # Dave: fan-coil rooms expose the real fan output as an InfoOnlyAnalog named
-    # "<room controller name> Fan Speed" (wired up in Loxone Config). Matched by
-    # name because the controls' room fields get rewritten in place during setup.
+    # "<room controller name> Fan Speed" (wired up in Loxone Config).
     fancoil_controllers = {
         irc["name"]: irc
         for irc in get_all(loxconfig, "IRoomControllerV2")
@@ -237,13 +237,7 @@ async def async_setup_entry(
         if sensor["name"].endswith(" Fan Speed") and irc:
             # Register the room controller's device first so it keeps the
             # controller's name rather than the fan sensor's.
-            room = irc.get("room", "")
-            get_or_create_device(
-                irc["uuidAction"],
-                irc["name"],
-                "RoomControllerV2",
-                loxconfig.get("rooms", {}).get(room, {}).get("name", room),
-            )
+            get_or_create_room_controller_device(loxconfig, irc)
             sensor.update(
                 {
                     "parent_id": irc["uuidAction"],
