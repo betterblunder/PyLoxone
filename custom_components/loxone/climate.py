@@ -19,6 +19,7 @@ from homeassistant.const import PRECISION_TENTHS, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.util.unit_conversion import TemperatureConverter
 from voluptuous import All, Optional, Range
 
 from . import LoxoneEntity
@@ -361,8 +362,6 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         self._states = kwargs["states"]
         self._states_reversed = { value: key for key, value in self._states.items() }
         self._state_attr_values = {}
-        self._attr_min_temp = 5
-        self._attr_max_temp = 40
         self.operating_mode = OperatingMode.OFF
         self.active_state = ActiveState.from_raw(ActiveMode.OFF.value)
         self.type = "RoomControllerV2"
@@ -628,6 +627,22 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
     def target_temperature_step(self) -> float | None:
         """Return the supported step of target temperature."""
         return 0.5
+
+    # Dave: limits are defined in Celsius and converted on every read so they
+    # always match temperature_unit (otherwise HA clamps °F setpoints to 40).
+    @property
+    def min_temp(self) -> float:
+        """Return the minimum temperature."""
+        return TemperatureConverter.convert(
+            5, UnitOfTemperature.CELSIUS, self.temperature_unit
+        )
+
+    @property
+    def max_temp(self) -> float:
+        """Return the maximum temperature."""
+        return TemperatureConverter.convert(
+            40, UnitOfTemperature.CELSIUS, self.temperature_unit
+        )
 
     @property
     def target_temperature_high(self) -> float | None:
