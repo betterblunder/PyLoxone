@@ -221,10 +221,38 @@ async def async_setup_entry(
     if "softwareVersion" in loxconfig:
         entities.append(LoxoneVersionSensor(miniserver.serial, loxconfig["softwareVersion"]))
 
+    # Dave: fan-coil rooms expose the real fan output as an InfoOnlyAnalog named
+    # "<room controller name> Fan Speed" (wired up in Loxone Config). Matched by
+    # name because the controls' room fields get rewritten in place during setup.
+    fancoil_controllers = {
+        irc["name"]: irc
+        for irc in get_all(loxconfig, "IRoomControllerV2")
+        if (irc["details"].get("linkedFancoils") or {}).get("useFancoil")
+    }
+
     for sensor in get_all(loxconfig, "InfoOnlyAnalog"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         sensor.update({"type": "analog"})
-        entities.append(LoxoneSensor(**sensor))
+        irc = fancoil_controllers.get(sensor["name"].removesuffix(" Fan Speed"))
+        if sensor["name"].endswith(" Fan Speed") and irc:
+            # Register the room controller's device first so it keeps the
+            # controller's name rather than the fan sensor's.
+            room = irc.get("room", "")
+            get_or_create_device(
+                irc["uuidAction"],
+                irc["name"],
+                "RoomControllerV2",
+                loxconfig.get("rooms", {}).get(room, {}).get("name", room),
+            )
+            sensor.update(
+                {
+                    "parent_id": irc["uuidAction"],
+                    "details": {**sensor["details"], "format": "%.0f%"},
+                }
+            )
+            entities.append(LoxoneFanSpeedSensor(**sensor))
+        else:
+            entities.append(LoxoneSensor(**sensor))
 
     for sensor in get_all(loxconfig, "TextInput"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
@@ -307,31 +335,6 @@ async def async_setup_entry(
                 config_entry=config_entry,
                 parent_id=irc["uuidAction"]
             ))
-
-    # Dave: register fan-speed sensors for IRoomControllerV2, as a percentage
-    # of the room's configured speed steps (Loxone only exposes a raw level,
-    # e.g. 1-3 or 1-6 depending on the room's linkedFancoils.fanspeedSteps).
-    for climate_id in get_all(loxconfig, "IRoomControllerV2"):
-        climate = add_room_and_cat_to_value_values(loxconfig, climate_id)
-        linked_fancoils = climate["details"].get("linkedFancoils")
-        if (
-            "fan" in climate["states"]
-            and linked_fancoils
-            and linked_fancoils.get("useFancoil")
-        ):
-            fan_speed = {
-                "parent_id": climate["uuidAction"],
-                "uuidAction": climate["states"]["fan"],
-                "type": "analog",
-                "room": climate.get("room", ""),
-                "cat": climate.get("cat", ""),
-                "name": f"{climate['name']} - Fan Speed",
-                "details": {"format": "%.0f%"},
-                "fanspeed_steps": linked_fancoils["fanspeedSteps"],
-                "async_add_devices": async_add_entities,
-                "config_entry": config_entry,
-            }
-            entities.append(LoxoneFanSpeedSensor(**fan_speed))
 
     @callback
     def async_add_sensors(_):
@@ -553,17 +556,15 @@ class LoxoneSensor(LoxoneEntity, SensorEntity):
 
 
 class LoxoneFanSpeedSensor(LoxoneSensor):
-    """Fan speed reported as a percentage of the room's configured speed steps."""
+    """Actual fan-coil speed as a percentage, attached to its room controller.
 
-    def __init__(self, **kwargs):
-        self._fanspeed_steps = kwargs.pop("fanspeed_steps")
-        super().__init__(**kwargs)
+    The Fan Coil Unit Controller output is 0-10 (the analog signal driving the
+    fan), whether the speed comes from auto or a manual step.
+    """
 
     async def event_handler(self, e):
         if self.uuidAction in e.data:
-            self._attr_native_value = round(
-                e.data[self.uuidAction] / self._fanspeed_steps * 100
-            )
+            self._attr_native_value = round(e.data[self.uuidAction] * 10)
             self.async_schedule_update_ha_state()
 
 
