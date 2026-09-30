@@ -99,13 +99,24 @@ def get_cat_name_from_cat_uuid(lox_config: dict, cat_uuid: str):
 
 
 def add_room_and_cat_to_value_values(loxconfig: dict, sensor: dict):
-    sensor.update(
-        {
-            "room": get_room_name_from_room_uuid(loxconfig, sensor.get("room", "")),
-            "cat": get_cat_name_from_cat_uuid(loxconfig, sensor.get("cat", "")),
-        }
+    # Return a copy: the control dicts belong to the shared structure file, and
+    # rewriting them in place made a second call resolve a room *name* as a
+    # UUID, blanking the room for every platform after the first.
+    return {
+        **sensor,
+        "room": get_room_name_from_room_uuid(loxconfig, sensor.get("room", "")),
+        "cat": get_cat_name_from_cat_uuid(loxconfig, sensor.get("cat", "")),
+    }
+
+
+def get_or_create_room_controller_device(loxconfig: dict, irc: dict):
+    """Device info for an IRoomControllerV2, given its raw structure-file control."""
+    return get_or_create_device(
+        irc["uuidAction"],
+        irc["name"],
+        "RoomControllerV2",
+        get_room_name_from_room_uuid(loxconfig, irc.get("room", "")),
     )
-    return sensor
 
 
 def get_miniserver_type(t):

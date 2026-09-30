@@ -35,7 +35,8 @@ from . import LoxoneEntity, MiniServer
 from .const import (CLIMATE_EVENT, CONF_ACTIONID, DOMAIN, EVENT, SENDDOMAIN,
                     THROTTLE_KEEP_ALIVE_TIME)
 from .helpers import (add_room_and_cat_to_value_values, clean_unit, get_all,
-                      get_or_create_device)
+                      get_or_create_device,
+                      get_or_create_room_controller_device)
 from .miniserver import get_miniserver_from_hass
 
 NEW_SENSOR = "sensors"
@@ -221,10 +222,31 @@ async def async_setup_entry(
     if "softwareVersion" in loxconfig:
         entities.append(LoxoneVersionSensor(miniserver.serial, loxconfig["softwareVersion"]))
 
+    # Dave: fan-coil rooms expose the real fan output as an InfoOnlyAnalog named
+    # "<room controller name> Fan Speed" (wired up in Loxone Config).
+    fancoil_controllers = {
+        irc["name"]: irc
+        for irc in get_all(loxconfig, "IRoomControllerV2")
+        if (irc["details"].get("linkedFancoils") or {}).get("useFancoil")
+    }
+
     for sensor in get_all(loxconfig, "InfoOnlyAnalog"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         sensor.update({"type": "analog"})
-        entities.append(LoxoneSensor(**sensor))
+        irc = fancoil_controllers.get(sensor["name"].removesuffix(" Fan Speed"))
+        if sensor["name"].endswith(" Fan Speed") and irc:
+            # Register the room controller's device first so it keeps the
+            # controller's name rather than the fan sensor's.
+            get_or_create_room_controller_device(loxconfig, irc)
+            sensor.update(
+                {
+                    "parent_id": irc["uuidAction"],
+                    "details": {**sensor["details"], "format": "%.0f%"},
+                }
+            )
+            entities.append(LoxoneFanSpeedSensor(**sensor))
+        else:
+            entities.append(LoxoneSensor(**sensor))
 
     for sensor in get_all(loxconfig, "TextInput"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
@@ -256,22 +278,6 @@ async def async_setup_entry(
                 }
                 entities.append(LoxoneMeterSensor(**subsensor))
 
-    # Dave: register humidity sensors for IRoomControllerV2
-    for climate_id in get_all(loxconfig, "IRoomControllerV2"):
-        climate = add_room_and_cat_to_value_values(loxconfig, climate_id)
-        if "humidityActual" in climate["states"]:
-            humidity = {
-                "parent_id": climate["uuidAction"],
-                "uuidAction": climate["states"]["humidityActual"],
-                "type": "analog",
-                "room": climate.get("room", ""),
-                "cat": climate.get("cat", ""),
-                "name": f"{climate['name']} - Humidity",
-                "details": {"format": "%.1f%"},
-                "async_add_devices": async_add_entities,
-                "config_entry": config_entry,
-            }
-            entities.append(LoxoneSensor(**humidity))
     # Climate controller demand sensors
     for ctrl_type in ("ClimateController", "ClimateControllerUS"):
         for ctrl in get_all(loxconfig, ctrl_type):
@@ -543,6 +549,19 @@ class LoxoneSensor(LoxoneEntity, SensorEntity):
         }
 
 
+class LoxoneFanSpeedSensor(LoxoneSensor):
+    """Actual fan-coil speed as a percentage, attached to its room controller.
+
+    The Fan Coil Unit Controller output is 0-10 (the analog signal driving the
+    fan), whether the speed comes from auto or a manual step.
+    """
+
+    async def event_handler(self, e):
+        if self.uuidAction in e.data:
+            self._attr_native_value = round(e.data[self.uuidAction] * 10)
+            self.async_schedule_update_ha_state()
+
+
 class LoxoneMeterSensor(LoxoneSensor, SensorEntity):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -568,7 +587,7 @@ class LoxoneRoomControllerTemperatureSensor(SensorEntity):
     """Sensor for IRoomControllerV2 comfort temperature states."""
 
     _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 

@@ -19,7 +19,8 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from . import LoxoneEntity
 from .const import SENDDOMAIN
 from .helpers import (add_room_and_cat_to_value_values, get_all,
-                      get_or_create_device)
+                      get_or_create_device,
+                      get_or_create_room_controller_device)
 from .miniserver import get_miniserver_from_hass
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,10 +46,24 @@ async def async_setup_entry(
     loxconfig = miniserver.lox_config.json
     entities = []
 
+    # Dave: map each room to its room controller so switches in the "Presence
+    # Detection" category can live on the same device as the room's climate
+    # entity. Rooms with more than one controller are ambiguous and left out.
+    controllers_by_room = {}
+    for irc in get_all(loxconfig, "IRoomControllerV2"):
+        controllers_by_room.setdefault(irc.get("room"), []).append(irc)
+
     for switch_entity in get_all(loxconfig, ["Switch", "TimedSwitch", "Intercom", "IRoomControllerV2", "LightControllerV2"]):
+        room_uuid = switch_entity.get("room")
         switch_entity = add_room_and_cat_to_value_values(loxconfig, switch_entity)
 
         if switch_entity["type"] in ["Switch"]:
+            room_controllers = controllers_by_room.get(room_uuid, [])
+            is_presence = switch_entity["cat"].lower() == "presence detection"
+            if is_presence and len(room_controllers) == 1:
+                switch_entity["device_info"] = get_or_create_room_controller_device(
+                    loxconfig, room_controllers[0]
+                )
             new_switch = LoxoneSwitch(**switch_entity)
             entities.append(new_switch)
 
@@ -199,6 +214,7 @@ class LoxoneSwitch(LoxoneEntity, SwitchEntity):
     _attr_assumed_state: None = None
 
     def __init__(self, **kwargs):
+        device_info = kwargs.pop("device_info", None)
         super().__init__(**kwargs)
         self._attr_state = STATE_UNKNOWN
         self._attr_is_on = STATE_UNKNOWN
@@ -208,7 +224,7 @@ class LoxoneSwitch(LoxoneEntity, SwitchEntity):
         self._assumed = False
 
         self.type = "Switch"
-        self._attr_device_info = get_or_create_device(
+        self._attr_device_info = device_info or get_or_create_device(
             self.unique_id, self.name, self.type, self.room
         )
 
