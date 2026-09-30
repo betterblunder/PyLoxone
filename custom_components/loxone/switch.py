@@ -46,9 +46,9 @@ async def async_setup_entry(
     loxconfig = miniserver.lox_config.json
     entities = []
 
-    # Dave: map each room to its room controller so "<...> Occupancy" switches
-    # can live on the same device as the room's climate entity. Rooms with more
-    # than one controller are ambiguous and left out.
+    # Dave: map each room to its room controller so switches in the "Presence
+    # Detection" category can live on the same device as the room's climate
+    # entity. Rooms with more than one controller are ambiguous and left out.
     controllers_by_room = {}
     for irc in get_all(loxconfig, "IRoomControllerV2"):
         controllers_by_room.setdefault(irc.get("room"), []).append(irc)
@@ -59,7 +59,8 @@ async def async_setup_entry(
 
         if switch_entity["type"] in ["Switch"]:
             room_controllers = controllers_by_room.get(room_uuid, [])
-            if switch_entity["name"].endswith(" Occupancy") and len(room_controllers) == 1:
+            is_presence = switch_entity["cat"].lower() == "presence detection"
+            if is_presence and len(room_controllers) == 1:
                 switch_entity["device_info"] = get_or_create_room_controller_device(
                     loxconfig, room_controllers[0]
                 )
