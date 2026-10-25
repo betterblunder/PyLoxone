@@ -18,6 +18,7 @@ from homeassistant.const import PRECISION_TENTHS, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.util.unit_conversion import TemperatureConverter
 from voluptuous import All, Optional, Range
 
 from . import LoxoneEntity
@@ -54,6 +55,10 @@ class ActiveState:
         dynamic_value = 0 if raw_value < 112 else (raw_value - 112) / 2560.0
         mode = ActiveMode(base_value)
         return cls(mode=mode, value=dynamic_value)
+
+# overrideReason 6/7: the controller is heating up / cooling down ahead of
+# the next comfort period on its own schedule, which is not an override.
+IRC_V2_PREPARE_REASONS = (6, 7)
 
 class OperatingMode(Enum):
     OFF = (-1, HVACMode.OFF)
@@ -396,13 +401,13 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         self._states = kwargs["states"]
         self._states_reversed = { value: key for key, value in self._states.items() }
         self._state_attr_values = {}
-        self._attr_min_temp = 5
-        self._attr_max_temp = 40
         self.operating_mode = OperatingMode.OFF
         self.active_state = ActiveState.from_raw(ActiveMode.OFF.value)
         self.type = "RoomControllerV2"
         self._single_comfort_temp = kwargs["details"].get("singleComfortTemperature", False)
-        self._demand = 0
+        # None until a ClimateController reports demand for this room; many
+        # setups have no ClimateController visible to the HA user at all.
+        self._demand = None
 
         # Copy mode list to avoid mutating shared kwargs data
         self._modeList = list(kwargs["details"]["timerModes"])
@@ -457,7 +462,6 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Handle climate demand events from ClimateController."""
         if event.data.get("uuid") == self.uuidAction:
             self._demand = event.data.get("value", 0)
-            self._demand = event.data["value"]
             self.schedule_update_ha_state()
 
     def get_mode_from_id(self, mode_id):
@@ -511,7 +515,8 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
 
     @property
     def is_overridden(self) -> bool:
-        return self.get_state_value("overrideReason", 0) > 0
+        reason = self.get_state_value("overrideReason", 0)
+        return reason > 0 and reason not in IRC_V2_PREPARE_REASONS
 
     # Dave: return current humidity for IRoomControllerV2
     @property
@@ -519,6 +524,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Return the current humidity."""
         return self.get_state_value("humidityActual")
 
+    @property
     def active_mode(self) -> ActiveMode:
         return self.active_state.mode
 
@@ -648,6 +654,22 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
         """Return the supported step of target temperature."""
         return 0.5
 
+    # Dave: limits are defined in Celsius and converted on every read so they
+    # always match temperature_unit (otherwise HA clamps °F setpoints to 40).
+    @property
+    def min_temp(self) -> float:
+        """Return the minimum temperature."""
+        return TemperatureConverter.convert(
+            5, UnitOfTemperature.CELSIUS, self.temperature_unit
+        )
+
+    @property
+    def max_temp(self) -> float:
+        """Return the maximum temperature."""
+        return TemperatureConverter.convert(
+            40, UnitOfTemperature.CELSIUS, self.temperature_unit
+        )
+
     @property
     def target_temperature_high(self) -> float | None:
         """Return the highbound target temperature we try to reach."""
@@ -670,6 +692,7 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
                 return self.get_state_value("heatProtectTemperature")
             elif active == ActiveMode.OFF:
                 return None
+        return None
 
     @property
     def target_temperature_low(self) -> float | None:
@@ -690,23 +713,61 @@ class LoxoneRoomControllerV2(LoxoneEntity, ClimateEntity, ABC):
                 return self.get_state_value("frostProtectTemperature")
             elif active == ActiveMode.OFF:
                 return None
+        return None
 
     @property
     def hvac_action(self) -> HVACAction | None:
-        """Return the current HVAC action (heating, cooling, idle)."""
-        if self.get_state_value("openWindow"):
+        """Return the current HVAC action (heating, cooling, idle).
+
+        A ClimateController's per-room demand wins when one reports it.
+        Otherwise the room controller's own ``active`` state (1 while it is
+        calling for heating or cooling) says whether it is running, and the
+        operating mode, or the temperature in heat/cool modes, says which.
+        """
+        if self.get_state_value("operatingMode") is None:
+            return None
+        if self.operating_mode is OperatingMode.OFF or self.get_state_value("openWindow"):
             return HVACAction.OFF
-        if self.get_state_value("prepareState") == 1:
+        prepare = self.get_state_value("prepareState")
+        if prepare == 1:
             return HVACAction.PREHEATING
-        if self._demand == -1:
+        if prepare == -1:
+            # HA has no pre-cooling action
             return HVACAction.COOLING
-        if self._demand == 1:
-            return HVACAction.HEATING
+        if self._demand is not None:
+            if self._demand == -1:
+                return HVACAction.COOLING
+            if self._demand == 1:
+                return HVACAction.HEATING
+            return HVACAction.IDLE
+        if self.get_state_value("active"):
+            return self._active_direction()
         return HVACAction.IDLE
+
+    def _active_direction(self) -> HVACAction:
+        """Heating or cooling, for a room controller that is active."""
+        op_mode = self.operating_mode
+        if op_mode in (OperatingMode.AUTO_HEAT, OperatingMode.MANUAL_HEAT):
+            return HVACAction.HEATING
+        if op_mode in (OperatingMode.AUTO_COOL, OperatingMode.MANUAL_COOL):
+            return HVACAction.COOLING
+
+        # Heat/cool: heating below the middle of the comfort range, cooling
+        # above it. Without a range, compare against the single target.
+        actual = self.get_state_value("tempActual")
+        low, high = self.target_temperature_low, self.target_temperature_high
+        reference = (low + high) / 2 if low is not None and high is not None else self.get_state_value("tempTarget")
+        if actual is None or reference is None:
+            return HVACAction.HEATING
+        return HVACAction.HEATING if actual < reference else HVACAction.COOLING
 
     @property
     def hvac_mode(self) -> HVACMode | None:
         """Return hvac operation ie. heat, cool mode."""
+        # Unknown until the Miniserver has sent the operating mode, instead
+        # of reporting the OFF placeholder and drawing a false "off" span.
+        if self.get_state_value("operatingMode") is None:
+            return None
         is_auto = self.operating_mode in (OperatingMode.AUTO_HEAT_COOL, OperatingMode.AUTO_COOL, OperatingMode.AUTO_HEAT)
         if is_auto and not self.is_overridden:
             return HVACMode.AUTO
