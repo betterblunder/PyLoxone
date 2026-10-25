@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_components.loxone.climate import (ActiveMode, ActiveState, HVACMode,
+from custom_components.loxone.climate import (ActiveMode, ActiveState, HVACAction, HVACMode,
                                               LoxoneRoomController,
                                               LoxoneRoomControllerV2,
                                               OperatingMode)
@@ -22,6 +22,7 @@ def _room_controller_v2(sent: list, operating_mode, active_mode, **state_values)
     rc.operating_mode = operating_mode
     rc.active_state = ActiveState(mode=active_mode, value=0)
     rc._range_possible = False
+    rc._demand = None
     rc._states = {name: f"uuid-{name}" for name in state_values}
     rc._state_attr_values = {f"uuid-{name}": v for name, v in state_values.items()}
     rc.schedule_update_ha_state = lambda: None
@@ -169,6 +170,94 @@ def test_economy_range_from_comfort_and_offsets():
     )
     assert rc.target_temperature_low == 19.0
     assert rc.target_temperature_high == 27.0
+
+
+def test_irc_v2_active_heat_cool_room_below_range_is_heating():
+    """Basement, live: no ClimateController in the structure file, so no
+    demand events; ``active`` was 1 at 69.8 in a 70-74 comfort range while
+    its radiant loop ran. Was reported idle."""
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT_COOL, ActiveMode.COMFORT,
+        operatingMode=0, active=1.0, tempActual=69.8, tempTarget=70.0,
+        comfortTemperature=70.0, comfortTemperatureCool=74.0,
+    )
+    assert rc.hvac_action == HVACAction.HEATING
+
+
+def test_irc_v2_active_heat_cool_room_above_range_is_cooling():
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT_COOL, ActiveMode.COMFORT,
+        operatingMode=0, active=1.0, tempActual=74.6,
+        comfortTemperature=70.0, comfortTemperatureCool=74.0,
+    )
+    assert rc.hvac_action == HVACAction.COOLING
+
+
+def test_irc_v2_active_heating_mode_is_heating():
+    """Den, live: heating-only automatic, fixed setpoint 74 at 71.2."""
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT, ActiveMode.FIXED_DYNAMIC,
+        operatingMode=1, active=1.0, tempActual=71.24, tempTarget=74.0,
+    )
+    assert rc.hvac_action == HVACAction.HEATING
+
+
+def test_irc_v2_inactive_room_is_idle():
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT, ActiveMode.COMFORT,
+        operatingMode=1, active=0.0, tempActual=73.0, tempTarget=71.0,
+    )
+    assert rc.hvac_action == HVACAction.IDLE
+
+
+def test_irc_v2_climate_controller_demand_wins_over_active():
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT_COOL, ActiveMode.COMFORT,
+        operatingMode=0, active=1.0, tempActual=69.0, tempTarget=70.0,
+    )
+    rc._demand = 0
+    assert rc.hvac_action == HVACAction.IDLE
+    rc._demand = -1
+    assert rc.hvac_action == HVACAction.COOLING
+
+
+@pytest.mark.parametrize(
+    ("prepare", "expected"), [(1, HVACAction.PREHEATING), (-1, HVACAction.COOLING)]
+)
+def test_irc_v2_prepare_state(prepare, expected):
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT_COOL, ActiveMode.COMFORT,
+        operatingMode=0, prepareState=prepare,
+    )
+    assert rc.hvac_action == expected
+
+
+def test_irc_v2_off_operating_mode_is_off():
+    rc = _room_controller_v2(
+        [], OperatingMode.OFF, ActiveMode.OFF, operatingMode=-1, active=0.0
+    )
+    assert rc.hvac_action == HVACAction.OFF
+    assert rc.hvac_mode == HVACMode.OFF
+
+
+def test_irc_v2_unknown_before_operating_mode_arrives():
+    """Bug: the OFF placeholder was reported until states arrived, drawing
+    multi-hour false "off" spans after a reload."""
+    rc = _room_controller_v2([], OperatingMode.OFF, ActiveMode.OFF)
+    assert rc.hvac_mode is None
+    assert rc.hvac_action is None
+
+
+@pytest.mark.parametrize("reason", [6, 7])
+def test_irc_v2_preparing_is_not_an_override(reason):
+    """Bug: pre-heating (overrideReason 6) counted as an override, so an
+    automatic heating room flipped to "heat" for the preparation window."""
+    rc = _room_controller_v2(
+        [], OperatingMode.AUTO_HEAT, ActiveMode.COMFORT,
+        operatingMode=1, overrideReason=reason,
+    )
+    assert not rc.is_overridden
+    assert rc.hvac_mode == HVACMode.AUTO
 
 
 @pytest.mark.parametrize(
