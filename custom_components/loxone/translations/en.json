@@ -26,6 +26,15 @@
           "overridden_by_source": "Overridden by source",
           "fixed": "Fixed Setpoint"
         }
+      },
+      "window_state": {
+        "state": {
+          "closed": "Closed",
+          "tilted": "Tilted",
+          "open": "Open",
+          "locked": "Locked",
+          "unlocked": "Unlocked"
+        }
       }
     }
   },
@@ -158,6 +167,16 @@
     "quick_shade": {
       "name": "Quick shade",
       "description": "Move Loxone Jalousie to shade position. Position is set by Loxone depends on multiple values."
+    }
+  },
+  "issues": {
+    "loxone_status": {
+      "title": "{title}",
+      "description": "{description}"
+    },
+    "loxone_device_status": {
+      "title": "{title}: {name}",
+      "description": "{description}"
     }
   }
 }

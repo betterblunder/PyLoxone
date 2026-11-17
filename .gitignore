@@ -12,6 +12,7 @@ hass.py
 *.yaml
 !/.github/workflows/*.yaml
 !/.github/ISSUE_TEMPLATE/*.yaml
+!/.pre-commit-config.yaml
 
 *.yml
 !/.github/workflows/*.yml
@@ -54,3 +55,6 @@ uv.lock
 # Dedicated test virtualenv (see scripts/test). .venv stays reserved
 # for the local Home Assistant runtime used for live Miniserver tests.
 .venv-test/
+
+# Blueprints
+!blueprints/**/*.yaml

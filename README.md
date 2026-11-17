@@ -15,7 +15,18 @@ Home Assistant binding for Loxone.
 A special thanks to Pawel Pieczul from the great openhab2 house automation software. 
 He really helped me a lot to with the new token based authentication. Thanks Pawel!!!
 
-#### This release works for the version 2024.1.0 and newer!!
+#### This release works for the version 2025.2.4 and newer!!
+
+## Recorder Configuration (important)
+> [!CAUTION]
+> **Please add this to your `configuration.yaml` before you use the integration.** A Loxone system generates a few thousand events per day. Without this exclusion, Home Assistant records all of them and the database can grow very quickly.
+
+```yaml
+recorder:
+  exclude:
+    event_types:
+      - loxone_event
+```
 
 
 ## Config for the gen2 miniserver
@@ -51,7 +62,7 @@ Change 123456789ABC to your miniserver Serial Number.
 Currently, this integration supports the following Loxone entities by mapping them to Home Assistant entities.
 If you encounter a Loxone entity that is currently not supported, you can post a feature request so it can be looked into.
 
-- InfoOnlyAnalog and InfoOnlyDigital
+- InfoOnlyAnalog, InfoOnlyDigital and InfoOnlyText (also memory flags, once "Use" is ticked for them in Loxone Config)
 - Switch, TimedSwitch and Pushbutton
 - Jalousie, Window and Gate
 - Intercom
@@ -62,7 +73,9 @@ If you encounter a Loxone entity that is currently not supported, you can post a
 - AudioZoneV2
 - Slider and ValueSelector (Up-Down Buttons)
 - TextInput
+- TextState (the "Status" block, as a read-only text sensor)
 - Radio Buttons
+- Message Center / System Status (see [Message Center (System Status)](#message-center-system-status))
 
 ## Known Limitations
 
@@ -113,6 +126,155 @@ homeassistant:
       device_class: humidity
 ```
 
+## Message Center (System Status)
+
+The Loxone Miniserver keeps a Message Center (shown as **System Status** in the Loxone app). It lists problems such as offline devices, low batteries, missing internet access or failed updates. The integration brings these messages into Home Assistant in two ways.
+
+### The Message Center sensor
+
+For each Message Center in your Loxone configuration, the integration creates a diagnostic sensor on the Miniserver device. Its entity id comes from the Loxone name, for example `sensor.system_status`. When the Miniserver reports a change, the integration fetches the current entries straight away.
+
+- **State**: the highest severity among the active entries:
+
+  | State | Meaning |
+  |---|---|
+  | `0` | No active messages |
+  | `1` | Info |
+  | `2` | Warning |
+  | `3` | Error |
+  | `4` | Critical |
+
+- **`status` attribute**: the number of active entries for each severity, e.g. `{2: 3, 3: 1}` means three warnings and one error.
+
+#### Example: message templates
+
+A template sensor that turns the numeric state into readable text:
+
+```yaml
+template:
+  - sensor:
+      - name: Loxone System Status Text
+        state: >-
+          {% set level = states('sensor.system_status') | int(0) %}
+          {{ {0: 'OK', 1: 'Info', 2: 'Warning', 3: 'Error', 4: 'Critical'}.get(level, 'Unknown') }}
+```
+
+A Markdown card that shows the entry counts and lists every active Loxone issue. It uses the `status` attribute and the `issues()` template function:
+
+```yaml
+type: markdown
+title: Loxone System Status
+content: >-
+  {% set counts = state_attr('sensor.system_status', 'status') or {} %}
+  **{{ counts.get(4, 0) }}** critical, **{{ counts.get(3, 0) }}** errors, **{{ counts.get(2, 0) }}** warnings
+
+  {% for key, item in issues().items() if key[0] == 'loxone' %}
+  - **{{ item.translation_placeholders.title }}**{% if item.translation_placeholders.name %}: {{ item.translation_placeholders.name }}{% endif %} ({{ item.severity }})
+  {% else %}
+  No active Loxone issues.
+  {% endfor %}
+```
+
+### Repairs
+
+Each active Message Center entry also appears as a repair issue under **Settings → System → Repairs**, next to the repairs from any other integration. Each issue shows:
+
+- the Loxone title and the affected device;
+- the description and the time the problem occurred;
+- a link to the affected Home Assistant entity, when there is one;
+- a **Learn more** link to the Loxone help page, when Loxone provides one.
+
+Loxone severities map to Home Assistant repair severities as follows: Info and Warning → `warning`, Error → `error`, Critical → `critical`. You can't fix these issues from Home Assistant. When an entry is resolved or acknowledged in Loxone, the repair issue is removed automatically.
+
+#### Example: automation for new repair issues
+
+To do more than show the repair, react to the `repairs_issue_registry_updated` event. This example automation reads the new repair issue and creates a persistent notification for it:
+
+```yaml
+alias: Notify on New Loxone Repair Issue
+description: Sends a notification whenever a new repair issue is registered.
+triggers:
+  - event_type: repairs_issue_registry_updated
+    trigger: event
+    event_data:
+      action: create
+      domain: loxone
+conditions: []
+actions:
+  - variables:
+      title: >-
+        {% set issue_item = issue(trigger.event.data.domain,
+        trigger.event.data.issue_id) %}{{
+        issue_item.translation_placeholders.title }}{% if
+        issue_item.translation_placeholders.name %}: {{
+        issue_item.translation_placeholders.name }}{% endif %}
+      message: >-
+        {% set issue_item = issue(trigger.event.data.domain,
+        trigger.event.data.issue_id) %}{{
+        issue_item.translation_placeholders.description }}
+      help_link: >-
+        {% set issue_item = issue(trigger.event.data.domain,
+        trigger.event.data.issue_id) %}{% if issue_item.learn_more_url %}
+        [Loxone Help]({{ issue_item.learn_more_url }}){% endif %}
+  - data:
+      title: '{{ title }}'
+      message: |-
+        {{ message }}
+        {{ help_link }}
+      data:
+        notification_id: '{{ trigger.event.data.issue_id }}'
+    action: notify.persistent_notification
+```
+
+#### Blueprints
+
+The repository ships two blueprints: an automation for Message Center repair issues and a script for sending commands to secured controls. Both are documented in detail in [BLUEPRINTS.md](BLUEPRINTS.md).
+
+| Blueprint | Type | Purpose |
+|---|---|---|
+| [Loxone Message Center repair issue](BLUEPRINTS.md#loxone-message-center-repair-issue) | Automation | Run your own actions for new repair issues |
+| [Loxone secured command](BLUEPRINTS.md#loxone-secured-command) | Script | Send a command to a secured control, asking for the visualisation password |
+
+To import the secured command blueprint, use **Settings → Automations & Scenes → Blueprints → Import Blueprint** with this URL (it works once the file is on `master`):
+
+```
+https://github.com/JoDehli/PyLoxone/blob/master/blueprints/secured_command_input_helper.yaml
+```
+
+#### Blueprint: run your own actions for new repair issues
+
+The repository includes an automation blueprint, [`blueprints/loxone_repair_issue.yaml`](blueprints/loxone_repair_issue.yaml). It triggers on every new Loxone repair issue and runs the actions you choose, such as a mobile notification, a TTS announcement or flashing a light. You can also set a minimum severity so that only errors or critical issues run your actions.
+
+[![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FJoDehli%2FPyLoxone%2Fblob%2Fmaster%2Fblueprints%2Floxone_repair_issue.yaml)
+
+You can also import it manually: go to **Settings → Automations & Scenes → Blueprints → Import Blueprint** and paste this URL:
+
+```
+https://github.com/JoDehli/PyLoxone/blob/master/blueprints/loxone_repair_issue.yaml
+```
+
+Your actions can use these variables in templates:
+
+| Variable | Content |
+|---|---|
+| `issue_id` | Unique id of the Message Center entry |
+| `issue_title` | Title, plus the affected device name when known |
+| `issue_message` | Description, including when the problem occurred |
+| `issue_help_url` | Link to the Loxone help page (may be empty) |
+| `issue_severity` | `warning`, `error` or `critical` |
+| `issue_entry` | The raw Message Center entry from the Miniserver |
+
+For example, to send a notification to your phone:
+
+```yaml
+action: notify.mobile_app_my_phone
+data:
+  title: "{{ issue_title }}"
+  message: "{{ issue_message }}"
+  data:
+    url: "{{ issue_help_url }}"
+```
+
 ## Log Configuration
 Use the following settings if you paste a log into a issue:
 
@@ -123,18 +285,19 @@ logger:
     homeassistant: warning
     homeassistant.helpers: warning
     custom_components.loxone: debug
-    custom_components.loxone.api: debug
+    pyloxone_api.connection: debug
 ```
 
-## Recorder Configuration
-A Loxone system generates a few thousand events per day. These events are recorded in your homeassistant and the database file can grow a lot per day. It is recommended to exclude loxone events from the recorder using the following settings:
+The Loxone communication lives in the [pyloxone-api](https://github.com/JoDehli/pyloxone-api) package, which is a separate package (logger name `pyloxone_api`, not `custom_components.loxone`). Use `pyloxone_api.connection: debug` to see the login steps (`authwithtoken`, `gettoken`, ...).
 
-```yaml
-recorder:
-  exclude:
-    event_types:
-      - loxone_event
-```
+## pyloxone-api dependency
+The integration uses the [pyloxone-api](https://github.com/JoDehli/pyloxone-api) package for the connection to the Miniserver. Home Assistant installs it automatically from the `requirements` entry in `custom_components/loxone/manifest.json`. The same version is pinned in `requirements.txt` for development; both must match.
+
+**Token storage:** After a successful login the integration saves the Loxone token in its config entry (`.storage/core.config_entries` in your Home Assistant config folder). The token is bound to the host, port and user of the entry. It is used for later starts so that no password login is needed. A token for a different host, port or user is ignored.
+
+- After updating from an older version, the first start performs one password login. This is expected.
+- Treat the `.storage` folder as sensitive: the stored token logs in as your Loxone user.
+- Removing the integration tries to invalidate the token on the Miniserver. This only works while the connection is still open; otherwise the token expires on its own.
 
 ## Websocket direct command service
 If you want to send data directly to Loxone inputs or blocks that are not (yet) supported, you can use this service to send a command:
