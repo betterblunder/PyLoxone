@@ -21,23 +21,29 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (CONF_DEVICE_CLASS, CONF_NAME,
                                  CONF_UNIT_OF_MEASUREMENT, CONF_VALUE_TEMPLATE,
                                  LIGHT_LUX, PERCENTAGE, STATE_UNKNOWN,
-                                 UnitOfEnergy, UnitOfPower, UnitOfRatio,
-                                 UnitOfSpeed, UnitOfTemperature, UnitOfVolume,
-                                 UnitOfVolumeFlowRate)
+                                 EntityCategory, UnitOfEnergy, UnitOfPower,
+                                 UnitOfRatio, UnitOfSpeed, UnitOfTemperature,
+                                 UnitOfVolume, UnitOfVolumeFlowRate)
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util import dt as dt_util
 
-from . import LoxoneEntity, MiniServer
+from custom_components.loxone import LoxoneEntity, miniserver
+
 from .const import (CLIMATE_EVENT, CONF_ACTIONID, DOMAIN, EVENT, SENDDOMAIN,
                     THROTTLE_KEEP_ALIVE_TIME)
 from .helpers import (add_room_and_cat_to_value_values, clean_unit, get_all,
-                      get_or_create_device,
-                      get_or_create_room_controller_device)
+                      get_datetime_from_loxone, get_device,
+                      get_or_create_device)
 from .miniserver import get_miniserver_from_hass
+from .window_monitor import (LoxoneWindowPositionSensor, window_contacts,
+                             window_monitor_controls,
+                             window_monitor_count_sensors)
 
 NEW_SENSOR = "sensors"
 
@@ -229,10 +235,14 @@ async def async_setup_entry(
     miniserver = get_miniserver_from_hass(hass, config_entry)
 
     loxconfig = miniserver.lox_config.json
-    entities: list[Any] = [LoxoneKeepAliveSensor(miniserver.serial)]
+    if loxconfig is None:
+        _LOGGER.error("No config json found")
+        return
+
+    entities: list[Any] = [LoxoneKeepAliveSensor(miniserver.serial, miniserver)]
 
     if "softwareVersion" in loxconfig:
-        entities.append(LoxoneVersionSensor(miniserver.serial, loxconfig["softwareVersion"]))
+        entities.append(LoxoneVersionSensor(miniserver.serial, loxconfig["softwareVersion"], miniserver))
 
     # Dave: fan-coil rooms expose the real fan output as an InfoOnlyAnalog named
     # "<room controller name> Fan Speed" (wired up in Loxone Config).
@@ -263,6 +273,17 @@ async def async_setup_entry(
     for sensor in get_all(loxconfig, "TextInput"):
         sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
         entities.append(LoxoneTextSensor(**sensor))
+
+    # #529: text memory flags and other text values with "Use" ticked in
+    # Loxone Config arrive as InfoOnlyText (state "text", like TextInput).
+    for sensor in get_all(loxconfig, "InfoOnlyText"):
+        sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
+        entities.append(LoxoneTextSensor(**sensor))
+
+    # #529: the "Status" block (TextState) - read-only text with icon/colour.
+    for sensor in get_all(loxconfig, "TextState"):
+        sensor = add_room_and_cat_to_value_values(loxconfig, sensor)
+        entities.append(LoxoneTextStateSensor(**sensor))
 
     for sensor in get_all(loxconfig, "Meter"):
         _LOGGER.debug("Found Meter: %s", sensor)
@@ -334,18 +355,22 @@ async def async_setup_entry(
                 parent_uuid=irc["uuidAction"],
             ))
 
-        if "humidityActual" in states:
-            entities.append(LoxoneSensor(
-                name=f"{irc['name']} - Humidity",
-                uuidAction=states["humidityActual"],
-                type="analog",
-                room=irc.get("room", ""),
-                cat=irc.get("cat", ""),
-                details={"format": "%.1f%"},
-                async_add_devices=async_add_entities,
-                config_entry=config_entry,
-                parent_id=irc["uuidAction"]
-            ))
+    if "globalStates" in loxconfig:
+        global_states = loxconfig.get("globalStates")
+        entities.append(LoxoneNotificationsSensor(miniserver.serial, global_states.get("notifications", None), miniserver))
+
+    messageCenter = loxconfig.get("messageCenter", {})
+    for key in messageCenter.keys():
+        sensor = messageCenter.get(key)
+        entities.append(LoxoneMessageCenterSensor(miniserver, **sensor))
+    # #524: WindowMonitor — a three-way position sensor per contact and the
+    # monitor's counters (the window/lock binary sensors live on the
+    # binary_sensor platform).
+    try:
+        entities.extend(LoxoneWindowPositionSensor(contact) for contact in window_contacts(loxconfig))
+        entities.extend(window_monitor_count_sensors(window_monitor_controls(loxconfig)))
+    except Exception:
+        _LOGGER.exception("Skipping WindowMonitor controls")
 
     @callback
     def async_add_sensors(_):
@@ -404,12 +429,14 @@ class LoxoneKeepAliveSensor(LoxoneEntity, SensorEntity):
     _attr_name = "Loxone Last Keep Alive Message"
     _attr_icon = "mdi:information-outline"
     _attr_unique_id = "loxone_keep_alive_sensor_uuid"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP  # tell HA this is a timestamp
 
-    def __init__(self, miniserver_serial, **kwargs):
+    def __init__(self, miniserver_serial, miniserver: miniserver.MiniServer, **kwargs):
         super().__init__(**kwargs)
         self._miniserver_serial = miniserver_serial
         self._attr_native_value = None
+        self._attr_device_info = miniserver.device_info
 
     @cached_property
     def unique_id(self) -> str:
@@ -441,9 +468,11 @@ class LoxoneVersionSensor(LoxoneEntity, SensorEntity):
     _attr_name = "Loxone Software Version"
     _attr_icon = "mdi:information-outline"
     _attr_unique_id = "loxone_software_version_uuid"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, minisersver_serial, version_list, **kwargs):
+    def __init__(self, minisersver_serial, version_list, miniserver: miniserver.MiniServer, **kwargs):
         super().__init__(**kwargs)
+        self._attr_device_info = miniserver.device_info
         self._miniserver_serial = minisersver_serial
         try:
             self._attr_native_value = ".".join([str(x) for x in version_list])
@@ -492,6 +521,96 @@ class LoxoneTextSensor(LoxoneEntity, SensorEntity):
             **self._attr_extra_state_attributes,
             "device_type": self.type,
         }
+
+
+# Home Assistant rejects a state longer than 255 characters.
+TEXT_STATE_MAX_LENGTH = 255
+
+
+def text_state_icon_and_color(raw: Any) -> dict[str, str]:
+    """Parse a TextState ``iconAndColor`` payload (#529).
+
+    Spec (Structure File, TextState): a text state holding JSON such as
+    ``{"icon": "Icons/xxxx.svg", "color": "#45864A"}``, since 13.1. Older
+    firmware has no such state; anything that is not a JSON object with
+    string values yields ``{}`` instead of an exception.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    parsed = {}
+    for key in ("icon", "color"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            parsed[key] = value.strip()
+    return parsed
+
+
+class LoxoneTextStateSensor(LoxoneTextSensor):
+    """The "Status" block (``TextState``, #529): a read-only text sensor.
+
+    The text arrives as a text event on ``textAndIcon``. A text longer
+    than Home Assistant's 255-character state limit is cut, with the full
+    text in the ``text`` attribute. The block's icon and colour
+    (``iconAndColor``) become the ``loxone_icon`` and ``color``
+    attributes; the icon is a Loxone SVG path, not an ``mdi:`` name, so
+    it is kept out of the ``icon`` attribute the frontend renders.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.type = "TextState"
+        states = self.states if isinstance(getattr(self, "states", None), dict) else {}
+        self._state_uuid = states.get("textAndIcon") or self.uuidAction
+        self._icon_color_uuid = states.get("iconAndColor")
+        self._icon_and_color: dict[str, str] = {}
+        self._attr_device_info = get_or_create_device(
+            self.unique_id, self.name, self.type, kwargs.get("room", "")
+        )
+
+    async def event_handler(self, e):
+        request_update = False
+        if self._icon_color_uuid and self._icon_color_uuid in e.data:
+            self._icon_and_color = text_state_icon_and_color(
+                e.data[self._icon_color_uuid]
+            )
+            request_update = True
+        if self._state_uuid in e.data:
+            self._state = str(e.data[self._state_uuid])
+            request_update = True
+        if request_update:
+            self.async_schedule_update_ha_state()
+
+    @property
+    def native_value(self):
+        """Return the text, cut to Home Assistant's state length limit."""
+        text = self._state
+        if isinstance(text, str) and len(text) > TEXT_STATE_MAX_LENGTH:
+            return text[: TEXT_STATE_MAX_LENGTH - 1] + "…"
+        return text
+
+    async def async_set_value(self, value):
+        """The Status block is an output; it takes no value."""
+        _LOGGER.warning("Ignoring write to read-only TextState '%s'", self.name)
+
+    @property
+    def extra_state_attributes(self):
+        """Return device specific state attributes."""
+        attributes = {
+            **super().extra_state_attributes,
+            "state_uuid": self._state_uuid,
+        }
+        if "icon" in self._icon_and_color:
+            attributes["loxone_icon"] = self._icon_and_color["icon"]
+        if "color" in self._icon_and_color:
+            attributes["color"] = self._icon_and_color["color"]
+        if isinstance(self._state, str) and len(self._state) > TEXT_STATE_MAX_LENGTH:
+            attributes["text"] = self._state
+        return attributes
 
 
 class LoxoneSensor(LoxoneEntity, SensorEntity):
@@ -731,3 +850,185 @@ class LoxoneClimateController(LoxoneEntity, SensorEntity):
             "cool_demand": self._cool_demand,
             "device_type": self.type,
         }
+
+class LoxoneNotificationsSensor(LoxoneEntity, SensorEntity):
+    _attr_should_poll = False
+    _attr_name = "Loxone Notificaitons"
+    _attr_icon = "mdi:information-outline"
+    _attr_unique_id = "loxone_notifications"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, minisersver_serial, notifications_uuid, miniserver: miniserver.MiniServer, **kwargs):
+        super().__init__(**kwargs)
+        self._attr_device_info = miniserver.device_info
+        self._miniserver_serial = minisersver_serial
+        self.uuidAction = notifications_uuid
+        self._state = STATE_UNKNOWN
+
+    @cached_property
+    def unique_id(self) -> str:
+        """Return a unique ID."""
+        return f"{self._miniserver_serial}-{self._attr_unique_id}"
+
+    @property
+    def native_value(self):
+        """Return the state of the sensor."""
+        return self._state
+
+    async def event_handler(self, e):
+        if self.uuidAction in e.data:
+            self._state = e.data[self.uuidAction]
+            _LOGGER.info(f"notification {e.data[self.uuidAction]}")
+            self.async_schedule_update_ha_state()
+
+class LoxoneMessageCenterSensor(LoxoneEntity, SensorEntity):
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, miniserver: miniserver.MiniServer, **kwargs):
+        self._attr_state_class = kwargs.pop("state_class", None)
+        self._attr_device_class = kwargs.pop("device_class", None)
+        self._attr_name = kwargs.pop("name", None)
+        self._attr_native_value = None  # Initialize state
+        # Must be after the kwargs.pop functions!
+        super().__init__(**kwargs)
+        self._attr_device_info = miniserver.device_info
+        self._last_update = None
+        self._changed_uuid = self.states.get("changed")
+        self._status = {}
+
+    @cached_property
+    def unique_id(self) -> str:
+        """Return a unique ID."""
+        return self.uuidAction
+
+    async def event_handler(self, e):
+        if self.uuidAction in e.data:
+            data = e.data[self.uuidAction]
+            self._active_entries = data
+
+            self.async_schedule_update_ha_state()
+        if self._changed_uuid in e.data:
+            changed = get_datetime_from_loxone(e.data[self._changed_uuid])
+            if self._last_update is None or changed > self._last_update:
+                self.hass.async_create_task(
+                    self.update_entries(),
+                    f"Update message center entries {self.entity_id}"
+                )
+        control = e.data.get("control", None)
+        if control and self.uuidAction in control and "getEntries" in control:
+            self.hass.async_create_task(
+                self.process_entries(e.data.get("value")),
+                f"Process message center entries {self.entity_id}"
+            )
+
+    @property
+    def extra_state_attributes(self):
+        """Return device specific state attributes."""
+        return {
+            **self._attr_extra_state_attributes,
+            "status": self._status
+        }
+
+    async def update_entries(self):
+        await self.hass.services.async_call(DOMAIN, "event_websocket_command", {
+            "uuid": self.uuidAction,
+            "value": "getEntries/2"
+        })
+
+    async def process_entries(self, value):
+        max_severity = 0
+        status = {}
+        value = json.loads(value)
+        entries = value.get("entries")
+        self._last_update = dt_util.utcnow()
+        issue_ids = []
+        for entry in entries:
+            if entry.get("isHistoric", False):
+                await self.clear_history_entry(entry)
+            else:
+                severity = entry.get("severity", 0)
+                if severity not in status:
+                    status[severity] = 0
+                status[severity] += 1
+                if severity > max_severity:
+                    max_severity = severity
+                issue_ids.append(entry.get("entryUuid"))
+                await self.process_active_entry(entry)
+
+        self._status = status
+        self._attr_native_value = max_severity
+        self.schedule_update_ha_state()
+
+        cleared = set(id for domain, id in ir.async_get(self.hass).issues if domain == "loxone" and id not in issue_ids)
+        for id in cleared:
+            _LOGGER.warning(f"issue registry has id {id} which is no longer an issue and was never deleted removing")
+            ir.async_delete_issue(
+                self.hass,
+                DOMAIN,
+                id,
+            )
+
+    async def clear_history_entry(self, entry):
+        entry_id = entry.get("entryUuid")
+        ir.async_delete_issue(
+            self.hass,
+            DOMAIN,
+            entry_id,
+        )
+
+    async def process_active_entry(self, entry):
+        entry_id = entry.get("entryUuid")
+        affected_uuids = entry.get("affectedUuids", None)
+        source_uuid = entry.get("sourceUuid", None)
+        message = entry.get("desc")
+        message = message.replace("<br><br>Further details can be found under the following link.", "\n")
+        help_link = entry.get("helpLink", None)
+        title = entry.get("title")
+        event_id = entry.get("eventId")
+        name = entry.get("affectedName", "Unknown")
+        severity = entry.get("severity", 0)
+        severity_str = "Critical" if severity > 3 else "Error" if severity > 2 else "Warning" if severity > 1 else "Info"
+        timestamps = entry.get("timestamps")
+        timestamp = dt_util.utc_from_timestamp(timestamps[0])
+        message += f"\n\nOccured at: {timestamp}"
+        _LOGGER.info(f"Message Center Status {timestamp} {severity_str} {event_id} {title} {name}")
+        issue_severity = ir.IssueSeverity.WARNING
+        if severity > 3:
+            issue_severity = ir.IssueSeverity.CRITICAL
+        elif severity > 2:
+            issue_severity = ir.IssueSeverity.ERROR
+
+        entities = er.async_get(self.hass).entities.get_entries_for_config_entry_id(self.platform.config_entry.entry_id) if self.platform.config_entry else None
+        translation_placeholders = {
+            "name": name,
+            "message_name": name,
+            "title": title,
+            "description": message,
+        }
+        data = {
+            "entry": entry,
+            "devices": []
+        }
+        for affected in affected_uuids:
+            device = get_device(affected, {})
+            if device and entities:
+                data["devices"].append(device)
+                entity = next(filter(lambda c: c.unique_id == affected, entities), None)
+                if entity:
+                    device_name = entity.name if entity.name else entity.original_name
+                    translation_placeholders["entity_id"] = entity.entity_id
+                    translation_placeholders["description"] += f"\n[{device_name}](/?more-info-entity-id={entity.entity_id})"
+                    if source_uuid == affected:
+                        translation_placeholders["name"] = device_name
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            entry_id,
+            is_fixable=False,
+            is_persistent=True,
+            severity=issue_severity,
+            translation_key="loxone_device_status",
+            translation_placeholders=translation_placeholders,
+            learn_more_url=help_link,
+            data=data,
+        )
